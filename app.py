@@ -508,16 +508,31 @@ def run_gemini(system_prompt: str, user_prompt: str, *, timeout_hint_seconds: in
 
 def _render_sidebar() -> None:
     with st.sidebar:
-        st.markdown("### Tool Suite")
-        # `st.page_link` can crash on some Streamlit versions if multipage metadata isn't present.
-        # Use a simple label/button instead (this is a single-page app).
+        st.markdown("### About")
         st.markdown("**The Clarity Bridge**")
+        st.caption("Turn legal, medical, insurance, and technical documents into plain language.")
+
+        st.markdown("### How it works")
         st.markdown(
-            "Looking for your other tool?\n\n- [Duplicate Detective](https://share.streamlit.io/)",
+            "- Upload a PDF or photo\n"
+            "- We extract the text (OCR for scans)\n"
+            "- You get a TL;DR + checklist + red flags + jargon decoder"
         )
+
+        st.markdown("### Privacy")
+        st.caption("Files are processed in memory and are not stored in a database.")
+
         st.markdown("---")
-        st.markdown("### Settings")
-        st.caption("Tip: Add your API key via Streamlit Secrets.")
+        st.markdown("### More tools")
+        st.markdown("- [Duplicate Detective](https://share.streamlit.io/)")
+
+        st.markdown("---")
+        st.markdown("### Support this project")
+        st.markdown("[Buy me a coffee (PayPal)](https://paypal.me/GewishCatedrilla)")
+
+        with st.expander("App setup (for deployers)"):
+            st.caption("Set these in Streamlit Secrets:")
+            st.code('GROQ_API_KEY="..."\nOCRSPACE_API_KEY="..."')
 
 
 def main() -> None:
@@ -543,15 +558,19 @@ def main() -> None:
 
     col_a, col_b, col_c = st.columns([1.1, 1.0, 1.0])
     with col_a:
-        document_type = st.selectbox("Document Type", DOCUMENT_TYPES, index=0)
+        document_type = st.selectbox("Document type", DOCUMENT_TYPES, index=0, help="Helps the AI focus on what matters most in this kind of document.")
     with col_b:
-        persona = st.selectbox("Explain it to me like", PERSONAS, index=0)
+        persona = st.selectbox("Explain it like I'm", PERSONAS, index=0, help="Choose the level of simplicity and tone.")
     with col_c:
         st.write("")
         st.write("")
-        st.caption("Best results with clear, text-heavy documents.")
+        st.caption("Tip: For best results, upload clear, readable documents.")
 
-    uploaded = st.file_uploader("Upload a PDF or image (PDF, JPG, PNG)", type=["pdf", "jpg", "jpeg", "png"])
+    uploaded = st.file_uploader(
+        "Upload a document (PDF or photo)",
+        type=["pdf", "jpg", "jpeg", "png"],
+        help="PDFs with selectable text work best. Scanned documents/photos may take a bit longer.",
+    )
 
     if not uploaded:
         st.info("Upload a document to see a clean Before vs. After simplification.")
@@ -568,18 +587,17 @@ def main() -> None:
 
     if not extracted.text.strip():
         ocr_ready = is_tesseract_available()
-        st.error("I couldn't extract readable text from that file.")
+        st.error("I couldn’t read any text from that file.")
         st.caption(
-            "Tip: Streamlit Community Cloud usually can’t install system packages like Tesseract. "
-            "For scanned PDFs/images, this app uses OCR.Space (API) when a key is set."
+            "If this is a scanned document or a photo, the app needs OCR to read it."
         )
         st.caption(
             f"File: {uploaded.name} • Type: {mime_type or 'unknown'} • Tesseract available: {'yes' if ocr_ready else 'no'}"
         )
         st.markdown(
-            "- If this is a **scanned** document (image-only PDF / photo), OCR is required.\n"
-            "- On **Streamlit Cloud**, set `OCRSPACE_API_KEY` in **Secrets** so OCR can run.\n"
-            "- On **local Windows**, you can also install the **Tesseract** app and add it to PATH."
+            "- Try uploading a clearer image (good lighting, not blurry), or a text-based PDF.\n"
+            "- If you’re running this app on **Streamlit Cloud**, the app owner must configure OCR in **Secrets**.\n"
+            "- If you’re running locally, you can install **Tesseract** for offline OCR."
         )
         last_err = _get_last_extraction_error()
         if last_err:
