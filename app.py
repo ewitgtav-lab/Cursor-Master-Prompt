@@ -524,7 +524,7 @@ def _render_sidebar() -> None:
 
         st.markdown("---")
         st.markdown("### More tools")
-        st.markdown("- [Duplicate Detective](https://share.streamlit.io/)")
+        st.markdown("- [Duplicate Detective](https://excel-swiss-army-knife-nhreghcf4e5b4mswhxobtz.streamlit.app/)")
 
         st.markdown("---")
         st.markdown("### Support this project")
