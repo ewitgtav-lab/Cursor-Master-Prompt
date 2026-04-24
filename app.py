@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import html
 import os
 import re
 import shutil
 import traceback
+import time
 from dataclasses import dataclass
 from typing import Final, Iterable
 
 import streamlit as st
+
+from providers.groq_llm import groq_chat, load_groq_config
+from providers.ocrspace import load_ocrspace_config, ocrspace_extract_text
 
 
 APP_TITLE: Final = "The Clarity Bridge"
@@ -16,19 +21,6 @@ APP_TAGLINE: Final = "From Complexity to Clarity."
 
 DOCUMENT_TYPES: Final[list[str]] = ["Legal", "Medical", "Insurance", "Technical"]
 PERSONAS: Final[list[str]] = ["A 5th Grader", "A Busy Parent", "A Non-native Speaker"]
-
-DEFAULT_TEXT_MODEL_CANDIDATES: Final[list[str]] = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash",
-]
-
-DEFAULT_VISION_MODEL_CANDIDATES: Final[list[str]] = [
-    "gemini-2.0-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash",
-]
 
 
 @dataclass(frozen=True)
@@ -115,6 +107,12 @@ Document text:
 {extracted_text}
 """
 
+def _secrets_dict() -> dict[str, object]:
+    try:
+        return dict(st.secrets)  # type: ignore[arg-type]
+    except Exception:
+        return {}
+
 
 def get_gemini_api_key() -> str | None:
     # Streamlit Cloud-friendly: support st.secrets and env vars.
@@ -183,9 +181,42 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
                 chunks.append(txt)
     return _safe_join(chunks)
 
+
+def extract_text_via_ocrspace(*, file_bytes: bytes, filename: str, mime_type: str) -> str:
+    cfg = load_ocrspace_config(secrets=_secrets_dict())
+    return ocrspace_extract_text(config=cfg, file_bytes=file_bytes, filename=filename, mime_type=mime_type)
+
+
+def simplify_via_groq(*, document_type: str, persona: str, text: str) -> str:
+    cfg = load_groq_config(secrets=_secrets_dict())
+    system_prompt = build_gemini_system_prompt(document_type=document_type, persona=persona)
+    user_prompt = build_gemini_user_prompt(text)
+    return groq_chat(config=cfg, system_prompt=system_prompt, user_prompt=user_prompt)
+
 def _looks_like_model_not_found(err: Exception) -> bool:
     msg = f"{err!r}".lower()
     return ("not_found" in msg) or ("is not found" in msg) or ("listmodels" in msg) or ("404" in msg)
+
+def _looks_like_quota_exhausted(err: Exception) -> bool:
+    msg = f"{err!r}".lower()
+    return ("resource_exhausted" in msg) or ("quota" in msg) or ("429" in msg)
+
+def _retry_after_seconds(err: Exception) -> float | None:
+    # Many SDK errors include "retry in 5.83s" or "retryDelay": "5s"
+    msg = f"{err!r}"
+    m = re.search(r"retry in ([0-9]+(?:\.[0-9]+)?)s", msg, flags=re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except Exception:
+            return None
+    m = re.search(r"retrydelay['\"]?: ['\"]?([0-9]+)s", msg, flags=re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except Exception:
+            return None
+    return None
 
 def _gemini_generate_text(*, system_prompt: str, user_prompt: str, temperature: float, max_output_tokens: int) -> str:
     """
@@ -208,16 +239,24 @@ def _gemini_generate_text(*, system_prompt: str, user_prompt: str, temperature: 
         last_err: Exception | None = None
         for model_name in model_candidates:
             try:
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=user_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        temperature=temperature,
-                        max_output_tokens=max_output_tokens,
-                    ),
-                )
-                return _normalize_whitespace(getattr(resp, "text", "") or "")
+                for attempt in range(3):
+                    try:
+                        resp = client.models.generate_content(
+                            model=model_name,
+                            contents=user_prompt,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_prompt,
+                                temperature=temperature,
+                                max_output_tokens=max_output_tokens,
+                            ),
+                        )
+                        return _normalize_whitespace(getattr(resp, "text", "") or "")
+                    except Exception as e:
+                        if attempt < 2 and _looks_like_quota_exhausted(e):
+                            wait_s = _retry_after_seconds(e) or (2.0 * (attempt + 1))
+                            time.sleep(min(wait_s, 10.0))
+                            continue
+                        raise
             except Exception as e:
                 last_err = e
                 if _looks_like_model_not_found(e) and not model_override:
@@ -237,11 +276,19 @@ def _gemini_generate_text(*, system_prompt: str, user_prompt: str, temperature: 
         for model_name in model_candidates:
             try:
                 model = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
-                resp = model.generate_content(
-                    user_prompt,
-                    generation_config={"temperature": temperature, "max_output_tokens": max_output_tokens},
-                )
-                return _normalize_whitespace(getattr(resp, "text", "") or "")
+                for attempt in range(3):
+                    try:
+                        resp = model.generate_content(
+                            user_prompt,
+                            generation_config={"temperature": temperature, "max_output_tokens": max_output_tokens},
+                        )
+                        return _normalize_whitespace(getattr(resp, "text", "") or "")
+                    except Exception as e:
+                        if attempt < 2 and _looks_like_quota_exhausted(e):
+                            wait_s = _retry_after_seconds(e) or (2.0 * (attempt + 1))
+                            time.sleep(min(wait_s, 10.0))
+                            continue
+                        raise
             except Exception as e:
                 last_err = e
                 if _looks_like_model_not_found(e) and not model_override:
@@ -250,6 +297,11 @@ def _gemini_generate_text(*, system_prompt: str, user_prompt: str, temperature: 
         if last_err is not None:
             raise last_err
     except Exception as e:
+        if _looks_like_quota_exhausted(e):
+            raise RuntimeError(
+                "Gemini quota exceeded. On Streamlit Cloud, OCR + summarization can be token-heavy. "
+                "Check your Gemini plan/billing and rate limits, then retry in a moment."
+            ) from e
         raise RuntimeError("Gemini request failed (API error). Please try again.") from e
 
 
@@ -287,12 +339,20 @@ def _gemini_vision_ocr(images: list["Image.Image"]) -> str:
         last_err: Exception | None = None
         for model_name in model_candidates:
             try:
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=[prompt, *parts],
-                    config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=4096),
-                )
-                return _normalize_whitespace(getattr(resp, "text", "") or "")
+                for attempt in range(3):
+                    try:
+                        resp = client.models.generate_content(
+                            model=model_name,
+                            contents=[prompt, *parts],
+                            config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=4096),
+                        )
+                        return _normalize_whitespace(getattr(resp, "text", "") or "")
+                    except Exception as e:
+                        if attempt < 2 and _looks_like_quota_exhausted(e):
+                            wait_s = _retry_after_seconds(e) or (2.0 * (attempt + 1))
+                            time.sleep(min(wait_s, 10.0))
+                            continue
+                        raise
             except Exception as e:
                 last_err = e
                 if _looks_like_model_not_found(e) and not model_override:
@@ -314,11 +374,19 @@ def _gemini_vision_ocr(images: list["Image.Image"]) -> str:
         for model_name in model_candidates:
             try:
                 model = genai.GenerativeModel(model_name=model_name)
-                resp = model.generate_content(
-                    [prompt, *images],
-                    generation_config={"temperature": 0.0, "max_output_tokens": 4096},
-                )
-                return _normalize_whitespace(getattr(resp, "text", "") or "")
+                for attempt in range(3):
+                    try:
+                        resp = model.generate_content(
+                            [prompt, *images],
+                            generation_config={"temperature": 0.0, "max_output_tokens": 4096},
+                        )
+                        return _normalize_whitespace(getattr(resp, "text", "") or "")
+                    except Exception as e:
+                        if attempt < 2 and _looks_like_quota_exhausted(e):
+                            wait_s = _retry_after_seconds(e) or (2.0 * (attempt + 1))
+                            time.sleep(min(wait_s, 10.0))
+                            continue
+                        raise
             except Exception as e:
                 last_err = e
                 if _looks_like_model_not_found(e) and not model_override:
@@ -328,6 +396,11 @@ def _gemini_vision_ocr(images: list["Image.Image"]) -> str:
             raise last_err
     except Exception as e:
         _set_last_extraction_error("Gemini Vision OCR (google-generativeai) traceback:\n" + traceback.format_exc())
+        if _looks_like_quota_exhausted(e):
+            raise RuntimeError(
+                "Gemini quota exceeded for OCR. This usually means your free-tier quota is exhausted or billing isn't enabled. "
+                "Enable billing / upgrade your plan, or wait and retry."
+            ) from e
         raise RuntimeError(f"Gemini Vision OCR failed. Last error: {last if 'last' in locals() else 'n/a'}; then {e!r}") from e
 
 def _pdf_pages_to_images(pdf_bytes: bytes, *, max_pages: int = 6, resolution: int = 175) -> list["Image.Image"]:
@@ -392,49 +465,21 @@ def extract_document(file_name: str, mime_type: str, data: bytes) -> ExtractedDo
     if mime_type == "application/pdf" or file_name.lower().endswith(".pdf"):
         text = extract_text_from_pdf(data)
         if not text.strip():
-            # Optional OCR fallback for scanned PDFs
+            # Streamlit Cloud-friendly OCR fallback.
             try:
-                import pdfplumber
-                from PIL import Image
-            except Exception:
-                return ExtractedDocument(filename=file_name, mime_type=mime_type, text="")
-
-            ocr_chunks: list[str] = []
-            try:
-                with pdfplumber.open(BytesIO(data)) as pdf:
-                    for page in pdf.pages:
-                        try:
-                            pil_img: Image.Image = page.to_image(resolution=200).original
-                            buf = BytesIO()
-                            pil_img.save(buf, format="PNG")
-                            ocr_txt = _try_ocr_image_bytes(buf.getvalue())
-                            if ocr_txt.strip():
-                                ocr_chunks.append(ocr_txt)
-                        except Exception:
-                            continue
-            except Exception:
-                ocr_chunks = []
-
-            text = _safe_join(ocr_chunks)
-
-        # Cloud-friendly OCR fallback (Gemini Vision) when Tesseract isn't available.
-        if not text.strip() and can_use_gemini():
-            try:
-                images = _pdf_pages_to_images(data, max_pages=6, resolution=175)
-                if images:
-                    text = _gemini_vision_ocr(images)
+                text = extract_text_via_ocrspace(file_bytes=data, filename=file_name, mime_type=mime_type)
             except Exception as e:
-                _set_last_extraction_error(f"Gemini Vision OCR (PDF) error: {e!r}")
+                _set_last_extraction_error(f"OCR.Space (PDF) error: {e!r}")
 
         return ExtractedDocument(filename=file_name, mime_type=mime_type, text=text)
 
     if mime_type in {"image/png", "image/jpeg"} or file_name.lower().endswith((".png", ".jpg", ".jpeg")):
         text = extract_text_from_image(data)
-        if not text.strip() and can_use_gemini():
+        if not text.strip():
             try:
-                text = extract_text_from_image_via_gemini(data)
+                text = extract_text_via_ocrspace(file_bytes=data, filename=file_name, mime_type=mime_type)
             except Exception as e:
-                _set_last_extraction_error(f"Gemini Vision OCR (image) error: {e!r}")
+                _set_last_extraction_error(f"OCR.Space (image) error: {e!r}")
         return ExtractedDocument(filename=file_name, mime_type=mime_type, text=text)
 
     return ExtractedDocument(filename=file_name, mime_type=mime_type, text="")
@@ -515,15 +560,15 @@ def main() -> None:
         ocr_ready = is_tesseract_available()
         st.error("I couldn't extract readable text from that file.")
         st.caption(
-            "Tip: Streamlit Community Cloud usually can’t install system packages like Tesseract, "
-            "so this app will try a Gemini Vision OCR fallback when an API key is set."
+            "Tip: Streamlit Community Cloud usually can’t install system packages like Tesseract. "
+            "For scanned PDFs/images, this app uses OCR.Space (API) when a key is set."
         )
         st.caption(
-            f"File: {uploaded.name} • Type: {mime_type or 'unknown'} • Tesseract available: {'yes' if ocr_ready else 'no'} • Gemini key set: {'yes' if can_use_gemini() else 'no'}"
+            f"File: {uploaded.name} • Type: {mime_type or 'unknown'} • Tesseract available: {'yes' if ocr_ready else 'no'}"
         )
         st.markdown(
             "- If this is a **scanned** document (image-only PDF / photo), OCR is required.\n"
-            "- On **Streamlit Cloud**, the easiest path is setting your **Gemini API key** (Secrets) so Vision OCR can run.\n"
+            "- On **Streamlit Cloud**, set `OCRSPACE_API_KEY` in **Secrets** so OCR can run.\n"
             "- On **local Windows**, you can also install the **Tesseract** app and add it to PATH."
         )
         last_err = _get_last_extraction_error()
@@ -532,12 +577,13 @@ def main() -> None:
                 st.code(last_err)
         st.stop()
 
-    system_prompt = build_gemini_system_prompt(document_type=document_type, persona=persona)
-    user_prompt = build_gemini_user_prompt(extracted.text)
-
     with st.spinner("Creating your simplified explanation…"):
         try:
-            simplified = run_gemini(system_prompt, user_prompt)
+            simplified = simplify_via_groq(
+                document_type=document_type,
+                persona=persona,
+                text=extracted.text,
+            )
         except Exception as e:
             st.error(str(e))
             st.stop()
@@ -545,12 +591,12 @@ def main() -> None:
     left, right = st.columns([1, 1], gap="large")
     with left:
         st.subheader("Original document text")
-        st.markdown(f'<div class="scroll-box">{st._utils.escape_markdown(extracted.text)}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="scroll-box">{html.escape(extracted.text)}</div>', unsafe_allow_html=True)
         st.caption(f"Source: {extracted.filename}")
 
     with right:
         st.subheader("Simplified Truth")
-        st.markdown(f'<div class="result-box">{st._utils.escape_markdown(simplified)}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="result-box">{html.escape(simplified)}</div>', unsafe_allow_html=True)
 
         st.download_button(
             "Download simplified version (.txt)",

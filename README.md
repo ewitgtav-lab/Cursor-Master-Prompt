@@ -29,12 +29,16 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2) Add your Gemini API key
+### 2) Add your API keys (Streamlit Cloud-friendly)
 
-Set one of these:
+Set these in **Streamlit Secrets** (recommended on Streamlit Cloud):
 
-- **Streamlit secrets** (recommended for Streamlit Cloud): `GEMINI_API_KEY`
-- **Environment variable**: `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
+- `GROQ_API_KEY` (LLM for the simplification)
+- `OCRSPACE_API_KEY` (OCR fallback for scanned PDFs/images)
+
+Optional:
+
+- `GROQ_MODEL` (default: `llama-3.1-8b-instant`)
 
 ### 3) Run
 
@@ -44,9 +48,8 @@ streamlit run app.py
 
 ## Notes on OCR (scanned documents)
 
-- This project includes `pytesseract` as an OCR fallback.
-- OCR requires the **Tesseract** binary installed on your machine (or available in your deployment image).
-- If OCR isn’t available, the app will prompt you when it can’t extract text from a scanned PDF/image.
+- On Streamlit Cloud, system installs (like Tesseract) are not reliable.
+- This app uses **OCR.Space** as the OCR fallback when `OCRSPACE_API_KEY` is set.
 
 ## Customize the AI prompt
 
