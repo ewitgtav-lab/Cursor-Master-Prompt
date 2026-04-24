@@ -12,7 +12,7 @@ from typing import Final, Iterable
 import streamlit as st
 
 from providers.groq_llm import groq_chat, load_groq_config
-from providers.ocrspace import load_ocrspace_config, ocrspace_extract_text
+from providers.ocrspace import load_ocrspace_config, ocrspace_extract_text, shrink_image_for_ocrspace
 
 
 APP_TITLE: Final = "The Clarity Bridge"
@@ -184,7 +184,17 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
 
 def extract_text_via_ocrspace(*, file_bytes: bytes, filename: str, mime_type: str) -> str:
     cfg = load_ocrspace_config(secrets=_secrets_dict())
-    return ocrspace_extract_text(config=cfg, file_bytes=file_bytes, filename=filename, mime_type=mime_type)
+    # OCR.Space free tier often rejects >1MB. If we're sending an image, compress it first.
+    mt = (mime_type or "").lower()
+    is_image = mt.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+    send_bytes = file_bytes
+    send_mime = mime_type
+    send_name = filename
+    if is_image and len(send_bytes) > 1_050_000:
+        send_bytes, send_mime = shrink_image_for_ocrspace(image_bytes=send_bytes)
+        if not send_name.lower().endswith(".jpg") and not send_name.lower().endswith(".jpeg"):
+            send_name = f"{send_name}.jpg"
+    return ocrspace_extract_text(config=cfg, file_bytes=send_bytes, filename=send_name, mime_type=send_mime)
 
 
 def simplify_via_groq(*, document_type: str, persona: str, text: str) -> str:

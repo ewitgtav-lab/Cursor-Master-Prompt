@@ -66,6 +66,7 @@ def ocrspace_extract_text(
 
     if payload.get("IsErroredOnProcessing"):
         msg = payload.get("ErrorMessage") or payload.get("ErrorDetails") or "Unknown OCR.Space error"
+        # Common free-tier error includes file size limits.
         raise RuntimeError(f"OCR.Space processing error: {msg}")
 
     parsed_results = payload.get("ParsedResults") or []
@@ -76,4 +77,44 @@ def ocrspace_extract_text(
             texts.append(t)
 
     return "\n".join(texts).strip()
+
+
+def shrink_image_for_ocrspace(
+    *,
+    image_bytes: bytes,
+    target_max_bytes: int = 980_000,
+    max_dim: int = 1600,
+) -> tuple[bytes, str]:
+    """
+    OCR.Space free tier commonly limits uploads to ~1MB.
+    This compresses an image to try to fit under `target_max_bytes`.
+    Returns (new_bytes, mime_type).
+    """
+    try:
+        from PIL import Image
+    except Exception as e:
+        raise RuntimeError("Missing dependency: pillow") from e
+
+    from io import BytesIO
+
+    img = Image.open(BytesIO(image_bytes))
+    img = img.convert("RGB")
+
+    w, h = img.size
+    scale = min(1.0, max_dim / max(w, h))
+    if scale < 1.0:
+        img = img.resize((int(w * scale), int(h * scale)))
+
+    # Try a few quality levels until we fit.
+    for quality in (80, 70, 60, 50, 40):
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True, progressive=True)
+        out = buf.getvalue()
+        if len(out) <= target_max_bytes:
+            return out, "image/jpeg"
+
+    # Return the smallest we managed.
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=35, optimize=True, progressive=True)
+    return buf.getvalue(), "image/jpeg"
 
