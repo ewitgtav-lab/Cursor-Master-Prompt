@@ -258,7 +258,7 @@ def _render_sidebar() -> None:
         # Use a simple label/button instead (this is a single-page app).
         st.markdown("**The Clarity Bridge**")
         st.markdown(
-            "Looking for your other tool?\n\n- [Duplicate Detective](https://share.streamlit.io/)",
+            "Looking for your other tool?\n\n- [Duplicate Detective](https://excel-swiss-army-knife-nhreghcf4e5b4mswhxobtz.streamlit.app/)",
         )
         st.markdown("---")
         st.markdown("### Settings")
