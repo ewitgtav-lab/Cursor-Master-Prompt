@@ -1,0 +1,8 @@
+streamlit>=1.36.0
+# Prefer the newer Gemini SDK; keep legacy SDK as fallback.
+google-genai>=0.7.0
+google-generativeai>=0.7.2
+pdfplumber>=0.11.4
+pillow>=10.4.0
+pytesseract>=0.3.10
+
